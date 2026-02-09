@@ -645,30 +645,50 @@ async def git_status(ctx: Context, project_id: int, branch: Optional[str] = None
         res = await client.get(f"{API_URL}/projects/{project_id}/repository/branches/{target_branch}", headers={"PRIVATE-TOKEN": token})
         return res.json()
 
+
 @mcp.tool()
-async def git_commit(ctx: Context, project_id: int, message: str, file_path: str, content: str, branch: Optional[str] = None) -> dict:
+async def git_commit(
+        ctx: Context,
+        project_id: int,
+        message: str,
+        changes: List[dict],
+        branch: Optional[str] = None
+) -> dict:
     """
-    Simulates 'git add', 'git commit', and 'git push' in one atomic action.
-    Updates an existing file or creates a new one if it doesn't exist.
+    Simulates 'git add .' and 'git commit' by committing multiple files at once.
     - project_id: Numeric ID of the project.
-    - message: The commit message (required).
-    - file_path: The full path of the file (e.g., 'src/main.py').
-    - content: The full string content to write to the file.
-    - branch: Optional. Target branch. Defaults to the project's default branch.
+    - message: The commit message.
+    - changes: A list of dictionaries, each containing:
+        - 'file_path': The path to the file.
+        - 'content': The new content of the file.
+        - 'action': (Optional) 'create', 'update', or 'delete'. Defaults to 'update'.
+    - branch: Optional. Target branch. Defaults to project's default branch.
     """
     token = ctx.get_state("token")
     target_branch = await resolve_branch(token, project_id, branch)
+
+    # Format the actions for the GitLab Commits API
+    actions = []
+    for change in changes:
+        actions.append({
+            "action": change.get("action", "update"),
+            "file_path": change["file_path"],
+            "content": change.get("content", ""),
+            "encoding": "text"
+        })
+
     payload = {
         "branch": target_branch,
         "commit_message": message,
-        "actions": [{"action": "update", "file_path": file_path, "content": content}]
+        "actions": actions
     }
+
     async with httpx.AsyncClient() as client:
-        # We try 'update' first, but the Commits API also supports 'create'
-        res = await client.post(f"{API_URL}/projects/{project_id}/repository/commits", headers={"PRIVATE-TOKEN": token}, json=payload)
-        if res.status_code == 400: # If file doesn't exist, try 'create'
-            payload["actions"][0]["action"] = "create"
-            res = await client.post(f"{API_URL}/projects/{project_id}/repository/commits", headers={"PRIVATE-TOKEN": token}, json=payload)
+        url = f"{API_URL}/projects/{project_id}/repository/commits"
+        res = await client.post(url, headers={"PRIVATE-TOKEN": token}, json=payload)
+
+        # If any file in the 'update' list doesn't exist, you might get a 400.
+        # Production tip: In a real 'git add .' scenario, you'd check file existence first.
         res.raise_for_status()
         return res.json()
 
