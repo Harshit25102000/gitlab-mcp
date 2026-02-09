@@ -829,6 +829,101 @@ async def assign_issue(ctx: Context, project_id: int, issue_iid: int, username_t
                                json={"assignee_ids": [users[0]["id"]]})
         res.raise_for_status()
         return {"status": "success", "assigned_to": username_to_assign}
+
+
+@mcp.tool()
+async def list_project_members(ctx: Context, project_id: int) -> List[dict]:
+    """
+    Lists all users who have access to the project.
+    Use this to find valid usernames for the 'assign_issue' tool.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "list_project_members", {"pid": project_id}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        url = f"{API_URL}/projects/{project_id}/members"
+        res = await client.get(url, headers={"PRIVATE-TOKEN": token})
+        res.raise_for_status()
+
+        members = res.json()
+        return [{"id": m["id"], "username": m["username"], "name": m["name"], "access_level": m["access_level"]} for m
+                in members]
+
+
+from typing import Optional, List, Literal, Union
+
+
+@mcp.tool()
+async def advanced_search(
+        ctx: Context,
+        query: str,
+        scope: Literal[
+            "projects", "issues", "merge_requests", "milestones",
+            "wiki_blobs", "commits", "blobs", "users", "notes", "snippet_titles"
+        ] = "projects",
+        project_id: Optional[Union[int, str]] = None,
+        group_id: Optional[Union[int, str]] = None,
+        search_type: Literal["basic", "advanced", "zoekt"] = "basic",
+        regex: bool = False,
+        state: Optional[Literal["opened", "closed"]] = None,
+        confidential: bool = False,
+        order_by: Literal["created_at"] = "created_at",
+        sort: Literal["asc", "desc"] = "desc",
+        fields: Optional[List[str]] = None
+) -> List[dict]:
+    """
+    Performs a deep search across GitLab projects, code, issues, and more.
+    Supports global, group-level, and project-level scopes with advanced filters.
+
+    Args:
+        query: The search term or regex pattern.
+        scope: The type of data to search for. Default is 'projects'.
+        project_id: (Optional) Limit search to a specific project.
+        group_id: (Optional) Limit search to a specific group.
+        search_type: 'zoekt' for exact code search (if enabled), 'advanced' for elasticsearch, 'basic' for standard.
+        regex: Set to True to use regular expressions (requires 'zoekt' or 'advanced' search).
+        state: Filter issues/merge_requests by 'opened' or 'closed'.
+        confidential: Filter by confidentiality (only applies to 'issues' scope).
+        order_by: Column to sort results by. Currently only 'created_at' is supported.
+        sort: Sort direction ('asc' or 'desc').
+        fields: (Optional) Fields to search in (e.g., ['title']). Applies only to issues/MRs.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "advanced_search", {"query": query, "scope": scope}, username)
+
+    token = ctx.get_state("token")
+
+    # Construct the correct endpoint URL
+    if project_id:
+        endpoint = f"projects/{project_id}/search"
+    elif group_id:
+        endpoint = f"groups/{group_id}/search"
+    else:
+        endpoint = "search"
+
+    params = {
+        "scope": scope,
+        "search": query,
+        "search_type": search_type,
+        "regex": str(regex).lower(),
+        "order_by": order_by,
+        "sort": sort,
+    }
+
+    # Conditional filters based on GitLab API constraints
+    if state and scope in ["issues", "merge_requests"]:
+        params["state"] = state
+    if confidential and scope == "issues":
+        params["confidential"] = str(confidential).lower()
+    if fields and scope in ["issues", "merge_requests"]:
+        params["fields[]"] = fields
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        url = f"{API_URL}/{endpoint}"
+        res = await client.get(url, headers={"PRIVATE-TOKEN": token}, params=params)
+        res.raise_for_status()
+        return res.json()
 # ============================================================
 # SERVER START
 # ============================================================
