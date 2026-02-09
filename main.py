@@ -5,7 +5,7 @@ from typing import Any, List, Optional
 from urllib.parse import quote
 from datetime import datetime
 import base64
-
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp import FastMCP
 from fastmcp.server.context import Context
 
@@ -31,6 +31,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("gitlab-mcp")
 
+
 # ============================================================
 # MCP & GITLAB CONFIG
 # ============================================================
@@ -40,6 +41,47 @@ API_URL = f"{GITLAB_BASE_URL}/api/v4"
 
 mcp = FastMCP("gitlab-mcp")
 
+
+# --- Middleware Implementation ---
+
+class GitLabAuthMiddleware(Middleware):
+    async def on_request(self, context: MiddlewareContext, call_next):
+        """ Runs before every tool or resource request """
+
+        # 1. Get request headers from the underlying FastMCP/Starlette request
+        request = context.fastmcp_context.request_context.request
+        auth_header = request.headers.get("authorization")
+
+        if not auth_header or not auth_header.lower().startswith("bearer "):
+            raise RuntimeError("Missing or invalid Authorization header")
+
+        token = auth_header.split(" ", 1)[1]
+
+        # 2. Validate Token and Get Username & Groups
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            headers = {"PRIVATE-TOKEN": token}
+
+            # Fetch user profile to get username
+            user_res = await client.get(f"{API_URL}/user", headers=headers)
+            if user_res.status_code != 200:
+                raise RuntimeError("Invalid GitLab Token")
+
+            user_data = user_res.json()
+            print(user_data)
+            username = user_data.get("username")
+            print(username)
+
+
+
+
+
+        # 4. Inject username into context so tools can use it if needed
+        # We can store it in the context's state for the duration of this request
+        context.fastmcp_context.set_state("username", username)
+
+
+        # Proceed to the actual tool execution
+        return await call_next(context)
 # ============================================================
 # USAGE LOGGING
 # ============================================================
@@ -171,6 +213,8 @@ async def list_projects(ctx: Context) -> List[dict]:
     - The user wants to discover projects
     - You need project_id or project_name for other tools
     """
+    username = ctx.get_state("username")
+    print(username)
     log_usage("tool", "list_projects", {})
     token = extract_gitlab_token(ctx)
 
