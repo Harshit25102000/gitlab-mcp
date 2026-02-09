@@ -8,7 +8,7 @@ import base64
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp import FastMCP
 from fastmcp.server.context import Context
-
+from fastmcp.server.dependencies import get_http_request
 # ============================================================
 # LOG DIRECTORY SETUP
 # ============================================================
@@ -39,7 +39,7 @@ logger = logging.getLogger("gitlab-mcp")
 GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://gitlab.com").rstrip("/")
 API_URL = f"{GITLAB_BASE_URL}/api/v4"
 
-mcp = FastMCP("gitlab-mcp")
+
 
 
 # --- Middleware Implementation ---
@@ -48,10 +48,12 @@ class GitLabAuthMiddleware(Middleware):
     async def on_request(self, context: MiddlewareContext, call_next):
         """ Runs before every tool or resource request """
 
-        # 1. Get request headers from the underlying FastMCP/Starlette request
-        request = context.fastmcp_context.request_context.request
-        auth_header = request.headers.get("authorization")
+        request = get_http_request()
+        if not request:
+            # If there's no HTTP request, we might be in STDIO mode
+            return await call_next(context)
 
+        auth_header = request.headers.get("authorization")
         if not auth_header or not auth_header.lower().startswith("bearer "):
             raise RuntimeError("Missing or invalid Authorization header")
 
@@ -82,11 +84,23 @@ class GitLabAuthMiddleware(Middleware):
 
         # Proceed to the actual tool execution
         return await call_next(context)
+
+mcp = FastMCP("gitlab-mcp")
+mcp.add_middleware(GitLabAuthMiddleware())
 # ============================================================
 # USAGE LOGGING
 # ============================================================
 
-def log_usage(kind: str, name: str, params: dict):
+async def resolve_branch(token: str, project_id: int, branch: Optional[str]) -> str:
+    """Internal helper to get the provided branch or fall back to project default."""
+    if branch:
+        return branch
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{API_URL}/projects/{project_id}", headers={"PRIVATE-TOKEN": token})
+        res.raise_for_status()
+        return res.json().get("default_branch", "main")
+
+def log_usage(kind: str, name: str, params: dict,username):
     """
     Writes tool/resource usage to logs/usage.log
 
@@ -95,7 +109,7 @@ def log_usage(kind: str, name: str, params: dict):
     """
     timestamp = datetime.utcnow().isoformat()
     with open(USAGE_LOG_FILE, "a") as f:
-        f.write(f"{timestamp} | {kind}={name} | params={params}\n")
+        f.write(f"{timestamp} | {kind}={name} | params={params}\n | {username}\n")
 
 # ============================================================
 # CORE UTILITIES
@@ -215,7 +229,7 @@ async def list_projects(ctx: Context) -> List[dict]:
     """
     username = ctx.get_state("username")
     print(username)
-    log_usage("tool", "list_projects", {})
+    log_usage("tool", "list_projects", {},username)
     token = extract_gitlab_token(ctx)
 
     projects = await gitlab_request(
@@ -613,6 +627,69 @@ async def project_details(project_id: str, ctx: Context) -> str:
             f"Last Activity: {project['last_activity_at']}",
         ]
     )
+
+
+# --- Git Simulation Tools ---
+
+@mcp.tool()
+async def git_status(ctx: Context, project_id: int, branch: Optional[str] = None) -> dict:
+    """
+    Simulates 'git status' by retrieving branch metadata and the latest commit info.
+    Use this to see if a branch exists, its protection status, and the latest SHA.
+    - project_id: Numeric ID of the project.
+    - branch: Optional. The branch to check. Defaults to the project's default branch.
+    """
+    token = ctx.get_state("token")
+    target_branch = await resolve_branch(token, project_id, branch)
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{API_URL}/projects/{project_id}/repository/branches/{target_branch}", headers={"PRIVATE-TOKEN": token})
+        return res.json()
+
+@mcp.tool()
+async def git_commit(ctx: Context, project_id: int, message: str, file_path: str, content: str, branch: Optional[str] = None) -> dict:
+    """
+    Simulates 'git add', 'git commit', and 'git push' in one atomic action.
+    Updates an existing file or creates a new one if it doesn't exist.
+    - project_id: Numeric ID of the project.
+    - message: The commit message (required).
+    - file_path: The full path of the file (e.g., 'src/main.py').
+    - content: The full string content to write to the file.
+    - branch: Optional. Target branch. Defaults to the project's default branch.
+    """
+    token = ctx.get_state("token")
+    target_branch = await resolve_branch(token, project_id, branch)
+    payload = {
+        "branch": target_branch,
+        "commit_message": message,
+        "actions": [{"action": "update", "file_path": file_path, "content": content}]
+    }
+    async with httpx.AsyncClient() as client:
+        # We try 'update' first, but the Commits API also supports 'create'
+        res = await client.post(f"{API_URL}/projects/{project_id}/repository/commits", headers={"PRIVATE-TOKEN": token}, json=payload)
+        if res.status_code == 400: # If file doesn't exist, try 'create'
+            payload["actions"][0]["action"] = "create"
+            res = await client.post(f"{API_URL}/projects/{project_id}/repository/commits", headers={"PRIVATE-TOKEN": token}, json=payload)
+        res.raise_for_status()
+        return res.json()
+
+@mcp.tool()
+async def git_checkout(ctx: Context, project_id: int, branch_name: str, start_point: Optional[str] = None) -> dict:
+    """
+    Simulates 'git checkout -b'. Creates a new branch from a starting point.
+    - project_id: Numeric ID of the project.
+    - branch_name: The name of the new branch to create.
+    - start_point: Optional. The source branch/SHA to branch from. Defaults to project's default branch.
+    """
+    token = ctx.get_state("token")
+    ref = await resolve_branch(token, project_id, start_point)
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            f"{API_URL}/projects/{project_id}/repository/branches",
+            headers={"PRIVATE-TOKEN": token},
+            params={"branch": branch_name, "ref": ref}
+        )
+        res.raise_for_status()
+        return res.json()
 
 # ============================================================
 # SERVER START
