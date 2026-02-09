@@ -228,7 +228,6 @@ async def list_projects(ctx: Context) -> List[dict]:
     - You need project_id or project_name for other tools
     """
     username = ctx.get_state("username")
-    print(username)
     log_usage("tool", "list_projects", {},username)
     token = extract_gitlab_token(ctx)
 
@@ -711,6 +710,125 @@ async def git_checkout(ctx: Context, project_id: int, branch_name: str, start_po
         res.raise_for_status()
         return res.json()
 
+
+# --- DevOps & Git Tools with Usage Logging ---
+
+@mcp.tool()
+async def get_merge_diff(ctx: Context, project_id: int, merge_request_iid: int) -> List[dict]:
+    """
+    Retrieves changes/diffs for a specific merge request.
+    - merge_request_iid: The internal IID (e.g., 5) of the MR.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "get_merge_diff", {"pid": project_id, "iid": merge_request_iid}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        url = f"{API_URL}/projects/{project_id}/merge_requests/{merge_request_iid}/changes"
+        res = await client.get(url, headers={"PRIVATE-TOKEN": token})
+        res.raise_for_status()
+        return res.json().get("changes", [])
+
+
+@mcp.tool()
+async def list_repository_trees(ctx: Context, project_id: int, path: str = None, recursive: bool = False) -> List[dict]:
+    """
+    Lists files and directories. Use 'recursive=True' to see all nested files.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "list_repository_trees", {"pid": project_id, "path": path}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        params = {"path": path, "recursive": recursive, "per_page": 100}
+        res = await client.get(f"{API_URL}/projects/{project_id}/repository/tree", headers={"PRIVATE-TOKEN": token},
+                               params=params)
+        res.raise_for_status()
+        return res.json()
+
+
+@mcp.tool()
+async def add_mr_comment(ctx: Context, project_id: int, merge_request_iid: int, body: str) -> dict:
+    """
+    Adds a Markdown comment to a merge request discussion.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "add_mr_comment", {"pid": project_id, "iid": merge_request_iid}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        url = f"{API_URL}/projects/{project_id}/merge_requests/{merge_request_iid}/notes"
+        res = await client.post(url, headers={"PRIVATE-TOKEN": token}, json={"body": body})
+        res.raise_for_status()
+        return {"status": "success", "note_id": res.json()["id"]}
+
+
+@mcp.tool()
+async def trigger_pipeline(ctx: Context, project_id: int, ref: str = "main") -> dict:
+    """
+    Triggers a CI/CD pipeline for a specific branch or tag.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "trigger_pipeline", {"pid": project_id, "ref": ref}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        res = await client.post(f"{API_URL}/projects/{project_id}/pipeline", headers={"PRIVATE-TOKEN": token},
+                                params={"ref": ref})
+        res.raise_for_status()
+        return res.json()
+
+
+@mcp.tool()
+async def get_pipeline_status(ctx: Context, project_id: int, pipeline_id: int) -> dict:
+    """
+    Checks the current status (running, success, failed) of a pipeline.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "get_pipeline_status", {"pid": project_id, "pipeline_id": pipeline_id}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{API_URL}/projects/{project_id}/pipelines/{pipeline_id}",
+                               headers={"PRIVATE-TOKEN": token})
+        res.raise_for_status()
+        return res.json()
+
+
+@mcp.tool()
+async def get_job_logs(ctx: Context, project_id: int, job_id: int) -> str:
+    """
+    Retrieves raw log output from a CI/CD job for troubleshooting.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "get_job_logs", {"pid": project_id, "job_id": job_id}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        res = await client.get(f"{API_URL}/projects/{project_id}/jobs/{job_id}/trace", headers={"PRIVATE-TOKEN": token})
+        res.raise_for_status()
+        return res.text
+
+
+@mcp.tool()
+async def assign_issue(ctx: Context, project_id: int, issue_iid: int, username_to_assign: str) -> dict:
+    """
+    Assigns an issue to a user by their GitLab username.
+    """
+    username = ctx.get_state("username")
+    log_usage("tool", "assign_issue", {"pid": project_id, "issue": issue_iid, "target": username_to_assign}, username)
+
+    token = ctx.get_state("token")
+    async with httpx.AsyncClient() as client:
+        user_res = await client.get(f"{API_URL}/users", headers={"PRIVATE-TOKEN": token},
+                                    params={"username": username_to_assign})
+        users = user_res.json()
+        if not users: return {"error": "User not found"}
+
+        res = await client.put(f"{API_URL}/projects/{project_id}/issues/{issue_iid}", headers={"PRIVATE-TOKEN": token},
+                               json={"assignee_ids": [users[0]["id"]]})
+        res.raise_for_status()
+        return {"status": "success", "assigned_to": username_to_assign}
 # ============================================================
 # SERVER START
 # ============================================================
